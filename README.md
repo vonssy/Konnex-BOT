@@ -1,6 +1,6 @@
 # 🚀 Konnex BOT
 
-> Automated claim daily check-in and multi-account management
+> Automated farming points and multi-account management
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
@@ -20,7 +20,7 @@
 
 ## 🎯 Overview
 
-Konnex BOT is an automated tool designed to claim daily check-in across multiple accounts. It provides seamless offers robust proxy support for enhanced security and reliability.
+Konnex BOT is an automated tool designed to farming points across multiple accounts. It provides seamless offers robust proxy support for enhanced security and reliability.
 
 **🔗 Get Started:** [Register on Konnex Reward Hub](https://hub.konnex.world/points?referral_code=VONSSY)
 
@@ -31,7 +31,7 @@ Konnex BOT is an automated tool designed to claim daily check-in across multiple
 - 🔄 **Automated Account Management** - Retrieve account information automatically
 - 🌐 **Flexible Proxy Support** - Run with or without proxy configuration
 - 🔀 **Smart Proxy Rotation** - Automatic rotation of invalid proxies
-- ⏰ **Daily Check-In** - Automated claim daily check-in
+- ⏰ **Daily Check-In & Testnet** - Automated claim daily check-in & Testnet
 - 👥 **Multi-Account Support** - Manage multiple accounts simultaneously
 
 ## 📋 Requirements
