@@ -2,17 +2,16 @@ from aiohttp import (
     ClientResponseError,
     ClientSession,
     ClientTimeout,
-    BasicAuth,
-    CookieJar
+    BasicAuth
 )
 from aiohttp_socks import ProxyConnector
-from yarl import URL
+from http.cookies import SimpleCookie
 from eth_account import Account
 from eth_account.messages import encode_defunct
 from eth_utils import to_hex
 from datetime import datetime, timezone
 from colorama import *
-import asyncio, random, json, re, os, pytz
+import asyncio, random, json, pytz, sys, re, os
 
 wib = pytz.timezone('Asia/Jakarta')
 
@@ -26,12 +25,13 @@ class Konnex:
         self.ORG_ID = "dbe51e03-92cc-4a5a-8d57-61c10753246b"
         self.RULES_ID = "0b0dacb4-9b51-4b3d-b42e-700959c47bf9"
         self.REF_CODE = "VONSSY" # U can change it with yours.
+        self.USE_PROXY = False
+        self.ROTATE_PROXY = False
         self.HEADERS = {}
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
-        self.sessions = {}
-        self.ua_index = 0
+        self.header_cookies = {}
         
         self.USER_AGENTS = [
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -78,7 +78,7 @@ class Konnex:
                 accounts = [line.strip() for line in file if line.strip()]
             return accounts
         except Exception as e:
-            self.log(f"{Fore.RED + Style.BRIGHT}Failed To Load Accounts: {e}{Style.RESET_ALL}")
+            print(f"{Fore.RED + Style.BRIGHT}Failed To Load Accounts: {e}{Style.RESET_ALL}")
             return None
 
     def load_proxies(self):
@@ -156,21 +156,29 @@ class Konnex:
 
         return proxy_url
     
-    def get_next_user_agent(self):
-        ua = self.USER_AGENTS[self.ua_index]
-        self.ua_index = (self.ua_index + 1) % len(self.USER_AGENTS)
-        return ua
+    def extract_cookies(self, address, response, jar=SimpleCookie()):
+        if address in self.header_cookies:
+            jar.load(self.header_cookies[address])
+
+        for h in response.headers.getall("Set-Cookie", []):
+            jar.load(h)
+
+        jar["referral_code"] = self.REF_CODE
+
+        self.header_cookies[address] = "; ".join(f"{k}={m.value}" for k, m in jar.items())
+
+        return self.header_cookies[address]
     
-    def initialize_headers(self, email: str, header_type: str):
-        if email not in self.HEADERS:
-            self.HEADERS[email] = {}
+    def initialize_headers(self, account: str, header_type: str):
+        if account not in self.HEADERS:
+            self.HEADERS[account] = {}
 
-        if "ua" not in self.HEADERS[email]:
-            self.HEADERS[email]["ua"] = self.get_next_user_agent()
+        if "ua" not in self.HEADERS[account]:
+            self.HEADERS[account]["ua"] = random.choice(self.USER_AGENTS)
 
-        ua = self.HEADERS[email]["ua"]
+        ua = self.HEADERS[account]["ua"]
 
-        if header_type not in self.HEADERS[email]:
+        if header_type not in self.HEADERS[account]:
 
             base_headers = {
                 "Accept-Encoding": "gzip, deflate, br",
@@ -200,46 +208,28 @@ class Konnex:
                     "Sec-Fetch-Site": "cross-site",
                 }
 
-            self.HEADERS[email][header_type] = headers
+            self.HEADERS[account][header_type] = headers
 
-        return self.HEADERS[email][header_type].copy()
-    
-    def get_session(self, address: str, proxy_url=None, timeout=60):
-        if address not in self.sessions:
-            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
-            
-            cookie_jar = CookieJar(unsafe=True)
-            
-            cookie_jar.update_cookies(
-                {'referral_code': self.REF_CODE}, 
-                URL(self.API_URL['hub'])
-            )
-            
-            session = ClientSession(
-                connector=connector,
-                timeout=ClientTimeout(total=timeout),
-                cookie_jar=cookie_jar,
-            )
-            
-            self.sessions[address] = {
-                'session': session,
-                'proxy': proxy,
-                'proxy_auth': proxy_auth
-            }
+        return self.HEADERS[account][header_type].copy()
         
-        return self.sessions[address]
-    
-    def generate_address(self, account: str):
+    def generate_address(self, private_key: str):
         try:
-            account = Account.from_key(account)
+            account = Account.from_key(private_key)
             address = account.address
             return address
         except Exception as e:
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Generate Address Failed {Style.RESET_ALL}"
+                f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+            )
             return None
         
-    def generate_payload(self, account: str, address: str, csrf_token: str):
+    def generate_payload(self, private_key: str, address: str, csrf_token: str):
         try:
-            issued_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+            dt_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            issued_at = dt_now.replace("+00:00", "Z")
 
             raw_message = json.dumps({
                 "domain": "hub.konnex.world",
@@ -264,7 +254,7 @@ class Konnex:
             )
 
             encoded_message = encode_defunct(text=message)
-            signed_message = Account.sign_message(encoded_message, private_key=account)
+            signed_message = Account.sign_message(encoded_message, private_key=private_key)
             signature = to_hex(signed_message.signature)
 
             payload = {
@@ -308,9 +298,9 @@ class Konnex:
                     self.USE_PROXY = True if proxy_choice == 1 else False
                     break
                 else:
-                    print(f"{Fore.RED + Style.BRIGHT}Please enter either 1  or 2.{Style.RESET_ALL}")
+                    print(f"{Fore.RED + Style.BRIGHT}Please enter either 1 or 2.{Style.RESET_ALL}")
             except ValueError:
-                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1  or 2).{Style.RESET_ALL}")
+                print(f"{Fore.RED + Style.BRIGHT}Invalid input. Enter a number (1 or 2).{Style.RESET_ALL}")
 
         if self.USE_PROXY:
             while True:
@@ -326,20 +316,15 @@ class Konnex:
             error_text = await response.text()
             raise Exception(f"HTTP {response.status}: {error_text}")
     
-    async def check_connection(self, address: str, proxy_url=None):
+    async def check_connection(self, proxy_url=None):
         url = "https://api.ipify.org?format=json"
 
+        connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
         try:
-            session_info = self.get_session(address, proxy_url, 15)
-            session = session_info['session']
-            proxy = session_info['proxy']
-            proxy_auth = session_info['proxy_auth']
-            
-            async with session.get(
-                url=url, proxy=proxy, proxy_auth=proxy_auth
-            ) as response:
-                await self.ensure_ok(response)
-                return True
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
+                async with session.get(url=url, proxy=proxy, proxy_auth=proxy_auth) as response:
+                    await self.ensure_ok(response)
+                    return True
         except (Exception, ClientResponseError) as e:
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
@@ -352,63 +337,54 @@ class Konnex:
     
     async def auth_csrf(self, address: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/auth/csrf"
-        headers = self.initialize_headers(address, "hub")
-        headers["Content-Type"] = "application/json"
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
-                
-                async with session.get(
-                    url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    result = await response.json()
-                    return result
-                    
+                headers = self.initialize_headers(address, "hub")
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        self.extract_cookies(address, response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Fetch Nonce Failed {Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT}Login   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Csrf Token {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
 
         return None
     
-    async def auth_credentials(self, account: str, address: str, csrf_token: str, proxy_url=None, retries=5):
+    async def auth_credentials(self, private_key: str, address: str, csrf_token: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/auth/callback/credentials"
-        headers = self.initialize_headers(address, "hub")
-        headers["Content-Type"] = "application/x-www-form-urlencoded"
-        payload = self.generate_payload(account, address, csrf_token)
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
-                
-                async with session.post(
-                    url=url, headers=headers, data=payload, proxy=proxy, proxy_auth=proxy_auth, allow_redirects=False
-                ) as response:
-                    cookies = session.cookie_jar.filter_cookies(URL(url))
-                    if any('session-token' in str(cookie.key) for cookie in cookies.values()):
+                headers = self.initialize_headers(address, "hub")
+                headers["Cookie"] = self.header_cookies[address]
+                headers["Content-Type"] = "application/json"
+                headers["X-Requested-With"] = "XMLHttpRequest"
+                payload = self.generate_payload(private_key, address, csrf_token)
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        self.extract_cookies(address, response)
                         return True
-                        
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Login Failed {Style.RESET_ALL}"
+                    f"{Fore.CYAN+Style.BRIGHT}Login   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Session Token {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -417,33 +393,29 @@ class Konnex:
 
     async def loyality_account(self, address: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/loyalty/accounts"
-        headers = self.initialize_headers(address, "hub")
-        params = {
-            "websiteId": self.WEB_ID, 
-            "organizationId": self.ORG_ID, 
-            "walletAddress": address
-        }
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
+                headers = self.initialize_headers(address, "hub")
+                headers["Cookie"] = self.header_cookies[address]
+                params = {
+                    "websiteId": self.WEB_ID, 
+                    "organizationId": self.ORG_ID, 
+                    "walletAddress": address
+                }
                 
-                async with session.get(
-                    url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    return await response.json()
-                    
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
                     continue
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Balance :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Fetch Points Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Points {Style.RESET_ALL}"
                     f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                     f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
@@ -452,32 +424,28 @@ class Konnex:
     
     async def complete_checkin(self, address: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/loyalty/rules/{self.RULES_ID}/complete"
-        headers = self.initialize_headers(address, "hub")
-        headers["Content-Type"] = "application/json"
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
+                headers = self.initialize_headers(address, "hub")
+                headers["Cookie"] = self.header_cookies[address]
+                headers["Content-Type"] = "application/json"
                 
-                async with session.post(
-                    url=url, headers=headers, json={}, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    result = await response.json()
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        result = await response.json()
 
-                    if response.status == 400:
-                        err_msg = result.get("message")
-                        self.log(
-                            f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
-                            f"{Fore.YELLOW+Style.BRIGHT} {err_msg} {Style.RESET_ALL}"
-                        )
-                        return None
-                    
-                    await self.ensure_ok(response)
-                    return result
-                    
+                        if response.status == 400:
+                            err_msg = result.get("message")
+                            self.log(
+                                f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
+                                f"{Fore.YELLOW+Style.BRIGHT} {err_msg} {Style.RESET_ALL}"
+                            )
+                            return None
+                        
+                        await self.ensure_ok(response)
+                        return result
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
@@ -493,20 +461,16 @@ class Konnex:
     
     async def list_tasks(self, address: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['testnet']}/api/v1/list_tasks"
-        headers = self.initialize_headers(address, "testnet")
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
-                
-                async with session.get(
-                    url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    return await response.json()
+                headers = self.initialize_headers(address, "testnet")
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
@@ -522,24 +486,20 @@ class Konnex:
     
     async def send_request(self, address: str, task_name: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['testnet']}/api/v1/send_request"
-        headers = self.initialize_headers(address, "testnet")
-        headers["Content-Type"] = "application/json"
-        payload = {
-            "task": task_name
-        }
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
-                
-                async with session.post(
-                    url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    return await response.json()
+                headers = self.initialize_headers(address, "testnet")
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "task": task_name
+                }
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
@@ -555,23 +515,19 @@ class Konnex:
     
     async def request_status(self, address: str, request_id: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['testnet']}/api/v1/request_status"
-        headers = self.initialize_headers(address, "testnet")
-        params = {
-            "id": request_id
-        }
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
+                headers = self.initialize_headers(address, "testnet")
+                params = {
+                    "id": request_id
+                }
                 
-                async with session.get(
-                    url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    return await response.json()
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url=url, headers=headers, params=params, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
@@ -587,28 +543,24 @@ class Konnex:
     
     async def request_feedback(self, address: str, request_id: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['testnet']}/api/v1/request_feedback"
-        headers = self.initialize_headers(address, "testnet")
-        headers["Content-Type"] = "application/json"
-        params = {
-            "request_id": request_id
-        }
-        payload = {
-            "score": 8,
-            "wallet": address
-        }
         
         for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                session_info = self.get_session(address, proxy_url)
-                session = session_info['session']
-                proxy = session_info['proxy']
-                proxy_auth = session_info['proxy_auth']
+                headers = self.initialize_headers(address, "testnet")
+                headers["Content-Type"] = "application/json"
+                params = {
+                    "request_id": request_id
+                }
+                payload = {
+                    "score": 8,
+                    "wallet": address
+                }
                 
-                async with session.post(
-                    url=url, headers=headers, params=params, json=payload, proxy=proxy, proxy_auth=proxy_auth
-                ) as response:
-                    await self.ensure_ok(response)
-                    return await response.json()
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(url=url, headers=headers, params=params, json=payload, proxy=proxy, proxy_auth=proxy_auth) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
                     await asyncio.sleep(5)
@@ -622,33 +574,39 @@ class Konnex:
 
         return None
     
-    async def process_check_connection(self, address: str, proxy_url: None):
+    async def process_check_connection(self, address: str, proxy_url=None):
         while True:
+            if self.USE_PROXY:
+                proxy_url = self.get_next_proxy_for_account(address)
+
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Proxy   :{Style.RESET_ALL}"
                 f"{Fore.WHITE+Style.BRIGHT} {self.display_proxy(proxy_url)} {Style.RESET_ALL}"
             )
 
-            is_valid = await self.check_connection(address, proxy_url)
+            is_valid = await self.check_connection(proxy_url)
             if is_valid: return True
 
             if self.ROTATE_PROXY:
-                self.rotate_proxy_for_account(address)
+                proxy_url = self.rotate_proxy_for_account(address)
                 await asyncio.sleep(1)
                 continue
 
             return False
     
-    async def process_user_login(self, account: str, address: str, proxy_url=None):
+    async def process_user_login(self, private_key: str, address: str, proxy_url=None):
         is_valid = await self.process_check_connection(address, proxy_url)
         if not is_valid: return False
+
+        if self.USE_PROXY:
+            proxy_url = self.get_next_proxy_for_account(address)
 
         auth_csrf = await self.auth_csrf(address, proxy_url)
         if not auth_csrf: return False
 
         csrf_token = auth_csrf.get("csrfToken")
 
-        credentials = await self.auth_credentials(account, address, csrf_token, proxy_url)
+        credentials = await self.auth_credentials(private_key, address, csrf_token, proxy_url)
         if not credentials: return False
 
         self.log(
@@ -658,12 +616,12 @@ class Konnex:
 
         return True
 
-    async def process_accounts(self, account: str, address: str, proxy_url=None):
+    async def process_accounts(self, private_key: str, address: str, proxy_url=None):
+        logined = await self.process_user_login(private_key, address, proxy_url)
+        if not logined: return False
+
         if self.USE_PROXY:
             proxy_url = self.get_next_proxy_for_account(address)
-
-        logined = await self.process_user_login(account, address, proxy_url)
-        if not logined: return False
 
         loyality = await self.loyality_account(address, proxy_url)
         if loyality:
@@ -756,7 +714,9 @@ class Konnex:
     async def main(self):
         try:
             accounts = self.load_accounts()
-            if not accounts: return
+            if not accounts:
+                print(f"{Fore.RED+Style.BRIGHT}No Accounts Loaded.{Style.RESET_ALL}") 
+                return
 
             self.print_question()
 
@@ -771,22 +731,25 @@ class Konnex:
                 if self.USE_PROXY: self.load_proxies()
 
                 separator = "=" * 25
-                for account in accounts:
-                    address = self.generate_address(account)
+                for idx, private_key in enumerate(accounts, start=1):
+
                     self.log(
                         f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
-                        f"{Fore.WHITE + Style.BRIGHT} {self.mask_account(address)} {Style.RESET_ALL}"
+                        f"{Fore.WHITE + Style.BRIGHT} {idx} {Style.RESET_ALL}"
+                        f"{Fore.CYAN + Style.BRIGHT}-{Style.RESET_ALL}"
+                        f"{Fore.WHITE + Style.BRIGHT} {len(accounts)} {Style.RESET_ALL}"
                         f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
                     )
 
-                    if not address:
-                        self.log(
-                            f"{Fore.CYAN + Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                            f"{Fore.RED + Style.BRIGHT} Invalid Private Key or Library Version Not Supported {Style.RESET_ALL}"
-                        )
-                        continue
+                    address = self.generate_address(private_key)
+                    if not address: continue
 
-                    await self.process_accounts(account, address)
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}Address :{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(address)} {Style.RESET_ALL}"
+                    )
+                        
+                    await self.process_accounts(private_key, address)
                     await asyncio.sleep(random.uniform(2.0, 3.0))
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*72)
@@ -809,10 +772,8 @@ class Konnex:
         except Exception as e:
             self.log(f"{Fore.RED+Style.BRIGHT}Error: {e}{Style.RESET_ALL}")
             raise e
-        finally:
-            for s in self.sessions.values():
-                if not s["session"].closed:
-                    await s["session"].close()
+        except asyncio.CancelledError:
+            raise
 
 if __name__ == "__main__":
     try:
@@ -824,3 +785,5 @@ if __name__ == "__main__":
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
             f"{Fore.RED + Style.BRIGHT}[ EXIT ] Konnex - BOT{Style.RESET_ALL}                                       "                              
         )
+    finally:
+        sys.exit(0)
