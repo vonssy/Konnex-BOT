@@ -80,12 +80,23 @@ pip install library_name==version
 
 ### Account Setup
 
-Create or edit `accounts.txt` in the project directory:
+Create or edit `accounts.json` in the project directory:
 
-```
-your_private_key_1
-your_private_key_2
-your_private_key_3
+```json
+[
+    {
+        "evm_wallet_private_key": "your_evm_private_key (without 0x)",
+        "konnex_wallet_mnemonic": "word1 word2 word3 .... word12"
+    },
+    {
+        "evm_wallet_private_key": "your_evm_private_key (without 0x)",
+        "konnex_wallet_mnemonic": "word1 word2 word3 .... word12"
+    },
+    {
+        "evm_wallet_private_key": "your_evm_private_key (without 0x)",
+        "konnex_wallet_mnemonic": "word1 word2 word3 .... word12"
+    }
+]
 ```
 
 ### Proxy Configuration (Optional)

@@ -6,19 +6,21 @@ from aiohttp import (
 )
 from aiohttp_socks import ProxyConnector
 from http.cookies import SimpleCookie
+from hashlib import sha256
+from eth_utils import to_hex
 from eth_account import Account
 from eth_account.messages import encode_defunct
-from eth_utils import to_hex
+from substrateinterface import Keypair, SubstrateInterface
 from datetime import datetime, timedelta, timezone
 from colorama import *
-import asyncio, random, json, pytz, sys, re, os
-
-wib = pytz.timezone('Asia/Jakarta')
+import asyncio, random, time, json, ssl, sys, re, os
 
 class Konnex:
     def __init__(self) -> None:
         self.API_URL = {
-            "hub": "https://hub.konnex.world"
+            "hub": "https://hub.konnex.world",
+            "testnet": "https://testnet-rpc2.konnex.world:30443",
+            "rpc_ws": "wss://testnet-rpc1.konnex.world:39944"
         }
         
         self.USE_PROXY = False
@@ -48,7 +50,7 @@ class Konnex:
 
     def log(self, message):
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}{message}",
             flush=True
         )
@@ -69,14 +71,19 @@ class Konnex:
         return f"{int(hours):02}:{int(minutes):02}:{int(seconds):02}"
     
     def load_accounts(self):
-        filename = "accounts.txt"
+        filename = "accounts.json"
         try:
+            if not os.path.exists(filename):
+                self.log(f"{Fore.RED}File {filename} Not Found.{Style.RESET_ALL}")
+                return
+
             with open(filename, 'r') as file:
-                accounts = [line.strip() for line in file if line.strip()]
-            return accounts
-        except Exception as e:
-            print(f"{Fore.RED + Style.BRIGHT}Failed To Load Accounts: {e}{Style.RESET_ALL}")
-            return None
+                data = json.load(file)
+                if isinstance(data, list):
+                    return data
+                return []
+        except json.JSONDecodeError:
+            return []
 
     def load_proxies(self):
         filename = "proxy.txt"
@@ -162,8 +169,8 @@ class Konnex:
         else:
             return today_target + timedelta(days=1)
     
-    def extract_cookies(self, address: str, response: object):
-        existing = self.accounts[address].get("cookies", {})
+    def extract_cookies(self, account: str, response: object):
+        existing = self.accounts[account].get("cookies", {})
         
         jar = SimpleCookie()
         
@@ -173,26 +180,28 @@ class Konnex:
         for h in response.headers.getall("Set-Cookie", []):
             jar.load(h)
         
-        self.accounts[address]["cookies"] = {
+        self.accounts[account]["cookies"] = {
             k: m.value for k, m in jar.items()
         }
 
-        return self.accounts[address]["cookies"]
+        return self.accounts[account]["cookies"]
     
-    def initialize_headers(self, address: str, type: str = "hub"):
-        if type == "subnets":
+    def initialize_headers(self, account: str, type: str = "hub"):
+        if type == "testnet":
             headers = {
                 "Accept": "application/json, text/plain, */*",
                 "Accept-Encoding": "gzip, deflate, br",
                 "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
                 "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "Host": "testnet-rpc2.konnex.world:30443",
                 "Origin": "https://subnets.testnet.konnex.world",
                 "Pragma": "no-cache",
                 "Referer": "https://subnets.testnet.konnex.world/",
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
-                "Sec-Fetch-Site": "same-origin",
-                "User-Agent": self.accounts[address]["user_agent"]
+                "Sec-Fetch-Site": "same-site",
+                "User-Agent": self.accounts[account]["user_agent"]
             }
 
         else:
@@ -207,30 +216,45 @@ class Konnex:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                "User-Agent": self.accounts[address]["user_agent"]
+                "User-Agent": self.accounts[account]["user_agent"]
             }
             
 
         return headers.copy()
     
-    def generate_address(self, private_key: str):
+    def generate_wallet(self, idx: int):
         try:
-            account = Account.from_key(private_key)
-            address = account.address
-            return address
+            if self.accounts[idx].get("evm_wallet_private_key"):
+                private_key = self.accounts[idx]["evm_wallet_private_key"]
+                evm_keypair = Account.from_key(private_key)
+                evm_address = evm_keypair.address
+                self.accounts[idx]["evm_keypair"] = evm_keypair
+                self.accounts[idx]["evm_address"] = evm_address
+            
+            if self.accounts[idx].get("konnex_wallet_mnemonic"):
+                mnemonic = self.accounts[idx]["konnex_wallet_mnemonic"]
+                knx_keypair =  Keypair.create_from_mnemonic(mnemonic, ss58_format=42)
+                knx_address = knx_keypair.ss58_address
+                self.accounts[idx]["knx_keypair"] = knx_keypair
+                self.accounts[idx]["knx_address"] = knx_address
+            
+            return True
         except Exception as e:
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
-                f"{Fore.RED+Style.BRIGHT} Generate Address Failed {Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Generate Wallet Failed {Style.RESET_ALL}"
                 f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
                 f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
             )
             return None
         
-    def generate_hub_payload(self, private_key: str, address: str, csrf_token: str):
+    def generate_hub_payload(self, idx: int, csrf_token: str):
         try:
             dt_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
             issued_at = dt_now.replace("+00:00", "Z")
+
+            keypair = self.accounts[idx]["evm_keypair"]
+            address = self.accounts[idx]["evm_address"]
 
             raw_message = json.dumps({
                 "domain": "hub.konnex.world",
@@ -255,10 +279,10 @@ class Konnex:
             )
 
             encoded_message = encode_defunct(text=message)
-            signed_message = Account.sign_message(encoded_message, private_key=private_key)
+            signed_message = keypair.sign_message(encoded_message)
             signature = to_hex(signed_message.signature)
 
-            payload = {
+            return {
                 "message": raw_message,
                 "accessToken": signature,
                 "signature": signature,
@@ -271,10 +295,128 @@ class Konnex:
                 "csrfToken": csrf_token,
                 "json": "true"
             }
-
-            return payload
         except Exception as e:
             raise Exception(f"Generate Req Payload Failed: {str(e)}")
+        
+    def generate_testnet_payload(self, idx: int):
+        try:
+            nonce = str(int(time.time()))
+
+            message = f"Konnex.world asks you to sign this text message to verify this wallet ownership. Nonce: {nonce}"
+            
+            encoded_message = encode_defunct(text=message)
+            keypair = self.accounts[idx]["evm_keypair"]
+            signed_message = keypair.sign_message(encoded_message)
+            signature = to_hex(signed_message.signature)
+
+            return {
+                "signature": signature,
+                "message": message,
+                "nonce": nonce
+            }
+        except Exception as e:
+            raise Exception(f"Generate Req Payload Failed: {str(e)}")
+        
+    def generate_drone_nav_params(self):
+        locactions = ["parking", "tall-buildings", "river"]
+        tasks = ["inspect", "patrol"]
+
+        return {
+            "location": random.choice(locactions),
+            "task": random.choice(tasks),
+        }
+    
+    def submit_drone_remark(self, idx: int, substrate: SubstrateInterface, nav_params: dict) -> str:
+        task_description = f"quest-drone-v1:{nav_params['location'].strip()}:{nav_params['task'].strip()}"
+        task_hash = sha256(task_description.strip().encode("utf-8")).hexdigest()
+        remark_payload = f"konnex-job:v1:4:0x{task_hash}"
+
+        call = substrate.compose_call(
+            call_module="System",
+            call_function="remark",
+            call_params={"remark": remark_payload}
+        )
+
+        keypair = self.accounts[idx]["knx_keypair"]
+
+        extrinsic = substrate.create_signed_extrinsic(call=call, keypair=keypair)
+
+        receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True)
+
+        if not receipt.is_success: return None
+
+        return receipt.extrinsic_hash
+    
+    def find_add_stake_call(self, substrate: SubstrateInterface):
+        substrate.init_runtime()
+
+        candidates = [
+            ("SubtensorModule", "add_stake"),
+            ("SubtensorModule", "addStake"),
+            ("Subtensor", "add_stake"),
+            ("Subtensor", "addStake"),
+        ]
+        for module_name, call_name in candidates:
+            call_meta = substrate.get_metadata_call_function(module_name, call_name)
+            if call_meta is not None:
+                return module_name, call_name, call_meta
+
+        found = [
+            (pallet.name, call.name)
+            for pallet in substrate.metadata.pallets if pallet.calls
+            for call in pallet.calls if "stake" in str(call.name).lower()
+        ]
+        if not found: return None
+
+        module_name, call_name = found[0]
+
+        return module_name, call_name, substrate.get_metadata_call_function(module_name, call_name)
+
+    def compute_stake_amount(self, idx: int, substrate: SubstrateInterface) -> int:
+        decimals = substrate.token_decimals
+
+        if decimals and decimals > 0:
+            max_stake = 1 * (10 ** decimals)
+            reserve_buffer = 10 ** max(decimals - 2, 0)
+        else:
+            max_stake = 1 * 1_000_000_000
+            reserve_buffer = 1_000_000
+
+        address = self.accounts[idx]["knx_address"]
+        account_info = substrate.query("System", "Account", [address])
+        free_balance = int(account_info.value["data"]["free"])
+
+        existential_deposit = substrate.get_constant("Balances", "ExistentialDeposit")
+        existential_deposit = int(existential_deposit.value) if existential_deposit is not None else 0
+        reserve = existential_deposit + reserve_buffer
+
+        if free_balance <= reserve: return None
+
+        amount = min(free_balance - reserve, max_stake)
+        return amount
+
+    def submit_alpha_stake(self, idx: int, substrate: SubstrateInterface, hotkey: str) -> str:
+        module_name, call_name, call_meta = self.find_add_stake_call(substrate)
+
+        arg_names = [str(arg.name) for arg in call_meta.args]
+        if len(arg_names) != 3: return None
+
+        amount = self.compute_stake_amount(idx, substrate)
+        if not amount: return None
+
+        call_params = dict(zip(arg_names, [hotkey, 4, amount]))
+
+        call = substrate.compose_call(call_module=module_name, call_function=call_name, call_params=call_params)
+        
+        keypair = self.accounts[idx]["knx_keypair"]
+        
+        extrinsic = substrate.create_signed_extrinsic(call=call, keypair=keypair)
+
+        receipt = substrate.submit_extrinsic(extrinsic, wait_for_inclusion=True)
+
+        if not receipt.is_success: return None
+
+        return receipt.extrinsic_hash
 
     def mask_account(self, account):
         try:
@@ -336,21 +478,21 @@ class Konnex:
         
         return None
     
-    async def websites_props(self, address: str, proxy_url=None, retries=5):
+    async def websites_props(self, idx: int, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/props/websites"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers(address)
-                cookies = self.accounts[address].get("cookies", {})
+                headers = self.initialize_headers(idx)
+                cookies = self.accounts[idx].get("cookies", {})
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(
                         url=url, headers=headers, cookies=cookies, proxy=proxy, proxy_auth=proxy_auth
                     ) as response:
                         await self.ensure_ok(response)
-                        self.extract_cookies(address, response)
+                        self.extract_cookies(idx, response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -365,21 +507,21 @@ class Konnex:
 
         return None
     
-    async def auth_csrf(self, address: str, proxy_url=None, retries=5):
+    async def auth_csrf(self, idx: int, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/auth/csrf"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers(address)
-                cookies = self.accounts[address].get("cookies", {})
+                headers = self.initialize_headers(idx)
+                cookies = self.accounts[idx].get("cookies", {})
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.get(
                         url=url, headers=headers, cookies=cookies, proxy=proxy, proxy_auth=proxy_auth
                     ) as response:
                         await self.ensure_ok(response)
-                        self.extract_cookies(address, response)
+                        self.extract_cookies(idx, response)
                         return await response.json()
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -394,24 +536,24 @@ class Konnex:
 
         return None
     
-    async def auth_credentials(self, private_key: str, address: str, csrf_token: str, proxy_url=None, retries=5):
+    async def auth_credentials(self, idx: int, csrf_token: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/auth/callback/credentials"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers(address)
+                headers = self.initialize_headers(idx)
                 headers["Content-Type"] = "application/json"
                 headers["X-Requested-With"] = "XMLHttpRequest"
-                cookies = self.accounts[address].get("cookies", {})
-                payload = self.generate_hub_payload(private_key, address, csrf_token)
+                cookies = self.accounts[idx].get("cookies", {})
+                payload = self.generate_hub_payload(idx, csrf_token)
 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(
                         url=url, headers=headers, cookies=cookies, json=payload, proxy=proxy, proxy_auth=proxy_auth
                     ) as response:
                         await self.ensure_ok(response)
-                        self.extract_cookies(address, response)
+                        self.extract_cookies(idx, response)
                         return True
             except (Exception, ClientResponseError) as e:
                 if attempt < retries - 1:
@@ -426,18 +568,18 @@ class Konnex:
 
         return None
 
-    async def loyality_accounts(self, address: str, proxy_url=None, retries=5):
+    async def loyality_accounts(self, idx: int, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/loyalty/accounts"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers(address)
-                cookies = self.accounts[address].get("cookies", {})
+                headers = self.initialize_headers(idx)
+                cookies = self.accounts[idx].get("cookies", {})
                 params = {
                     "websiteId": self.props["web_id"], 
                     "organizationId": self.props["org_id"], 
-                    "walletAddress": address
+                    "walletAddress": self.accounts[idx]["evm_address"]
                 }
                 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
@@ -459,14 +601,14 @@ class Konnex:
 
         return None
 
-    async def loyality_rules(self, address: str, proxy_url=None, retries=5):
+    async def loyality_rules(self, idx: int, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/loyalty/rules"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers(address)
-                cookies = self.accounts[address].get("cookies", {})
+                headers = self.initialize_headers(idx)
+                cookies = self.accounts[idx].get("cookies", {})
                 params = {
                     "limit": "100",
                     "websiteId": self.props["web_id"], 
@@ -495,15 +637,15 @@ class Konnex:
 
         return None
     
-    async def complete_checkin(self, address: str, rules_id: str, proxy_url=None, retries=5):
+    async def complete_checkin(self, idx: int, rules_id: str, proxy_url=None, retries=5):
         url = f"{self.API_URL['hub']}/api/loyalty/rules/{rules_id}/complete"
         
         for attempt in range(retries):
             connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
             try:
-                headers = self.initialize_headers(address)
+                headers = self.initialize_headers(idx)
                 headers["Content-Type"] = "application/json"
-                cookies = self.accounts[address].get("cookies", {})
+                cookies = self.accounts[idx].get("cookies", {})
                 
                 async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
                     async with session.post(
@@ -534,10 +676,172 @@ class Konnex:
 
         return None
     
-    async def process_check_connection(self, address: str, proxy_url=None):
+    async def verify_wallet(self, idx: int, sign_data: dict, proxy_url=None, retries=5):
+        url = f"{self.API_URL['testnet']}/api/v1/quest/snag/verify-wallet"
+        
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(idx, "testnet")
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "wallet": self.accounts[idx]["evm_address"],
+                    "signature": sign_data["signature"],
+                    "message": sign_data["message"],
+                    "nonce": sign_data["nonce"]
+                }
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(
+                        url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth, ssl=False
+                    ) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Verify  :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Verify EVM Wallet {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+    
+    async def claim_faucet(self, idx: int, sign_data: dict, proxy_url=None, retries=5):
+        url = f"{self.API_URL['testnet']}/api/v1/quest/faucet"
+        
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(idx, "testnet")
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "evm_wallet": self.accounts[idx]["evm_address"],
+                    "evm_signature": sign_data["signature"],
+                    "knx_wallet": self.accounts[idx]["knx_address"],
+                    "message": sign_data["message"],
+                    "nonce": sign_data["nonce"]
+                }
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(
+                        url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth, ssl=False
+                    ) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Faucet  :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Claim KNX Tokens {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+    
+    async def drone_request(self, idx: int, txid: str, nav_params: dict, proxy_url=None, retries=5):
+        url = f"{self.API_URL['testnet']}/api/v1/quest/drone/request"
+        
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(idx, "testnet")
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "knx_wallet": self.accounts[idx]["knx_address"],
+                    "txid": txid,
+                    "params": nav_params
+                }
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(
+                        url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth, ssl=False
+                    ) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Drone   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Sending Navigation Request {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+    
+    async def subnets_list(self, idx: int, proxy_url=None, retries=5):
+        url = f"{self.API_URL['testnet']}/api/v1/quest/subnets"
+        
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(idx, "testnet")
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(
+                        url=url, headers=headers, proxy=proxy, proxy_auth=proxy_auth, ssl=False
+                    ) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Alpha   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Fetch Subnets {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+    
+    async def alpha_bought(self, idx: int, txid: str, proxy_url=None, retries=5):
+        url = f"{self.API_URL['testnet']}/api/v1/quest/alpha-bought"
+        
+        for attempt in range(retries):
+            connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
+            try:
+                headers = self.initialize_headers(idx, "testnet")
+                headers["Content-Type"] = "application/json"
+                payload = {
+                    "knx_wallet": self.accounts[idx]["knx_address"],
+                    "txid": txid,
+                    "netuid": 4
+                }
+
+                async with ClientSession(connector=connector, timeout=ClientTimeout(total=60)) as session:
+                    async with session.post(
+                        url=url, headers=headers, json=payload, proxy=proxy, proxy_auth=proxy_auth, ssl=False
+                    ) as response:
+                        await self.ensure_ok(response)
+                        return await response.json()
+            except (Exception, ClientResponseError) as e:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Alpha   :{Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Failed to Buy {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
+                )
+
+        return None
+    
+    async def process_check_connection(self, idx: int, proxy_url=None):
         while True:
             if self.USE_PROXY:
-                proxy_url = self.get_next_proxy_for_account(address)
+                proxy_url = self.get_next_proxy_for_account(idx)
 
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}Proxy   :{Style.RESET_ALL}"
@@ -548,20 +852,20 @@ class Konnex:
             if is_valid: return True
 
             if self.ROTATE_PROXY:
-                proxy_url = self.rotate_proxy_for_account(address)
+                proxy_url = self.rotate_proxy_for_account(idx)
                 await asyncio.sleep(1)
                 continue
 
             return False
     
-    async def process_user_login(self, private_key: str, address: str, proxy_url=None):
-        is_valid = await self.process_check_connection(address, proxy_url)
+    async def process_user_login(self, idx: int, proxy_url=None):
+        is_valid = await self.process_check_connection(idx, proxy_url)
         if not is_valid: return False
 
         if self.USE_PROXY:
-            proxy_url = self.get_next_proxy_for_account(address)
+            proxy_url = self.get_next_proxy_for_account(idx)
 
-        props = await self.websites_props(address, proxy_url)
+        props = await self.websites_props(idx, proxy_url)
         if not props: return False
 
         web_id = props.get("websiteId")
@@ -577,12 +881,12 @@ class Konnex:
         self.props["web_id"] = web_id
         self.props["org_id"] = org_id
 
-        auth_csrf = await self.auth_csrf(address, proxy_url)
+        auth_csrf = await self.auth_csrf(idx, proxy_url)
         if not auth_csrf: return False
 
         csrf_token = auth_csrf.get("csrfToken")
 
-        credentials = await self.auth_credentials(private_key, address, csrf_token, proxy_url)
+        credentials = await self.auth_credentials(idx, csrf_token, proxy_url)
         if not credentials: return False
 
         self.log(
@@ -592,14 +896,70 @@ class Konnex:
 
         return True
 
-    async def process_accounts(self, private_key: str, address: str, proxy_url=None):
-        logined = await self.process_user_login(private_key, address, proxy_url)
+    async def process_drone_request(self, idx: int, substrate: SubstrateInterface, proxy_url=None):
+        nav_params = self.generate_drone_nav_params()
+
+        txid = self.submit_drone_remark(idx, substrate, nav_params)
+        if not txid:
+            self.log(
+                f"{Fore.BLUE+Style.BRIGHT}   Drone   :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Failed to Sign On-Chain {Style.RESET_ALL}"
+            )
+            return False
+        
+        drone = await self.drone_request(idx, txid, nav_params, proxy_url)
+        if not drone: return False
+
+        self.log(
+            f"{Fore.BLUE+Style.BRIGHT}   Drone   :{Style.RESET_ALL}"
+            f"{Fore.GREEN+Style.BRIGHT} Navigation Request Successfully Sent {Style.RESET_ALL}"
+        )
+
+        return True
+    
+    async def process_alpha_bought(self, idx: int, substrate: SubstrateInterface, proxy_url=None):
+        subnets = await self.subnets_list(idx, proxy_url)
+        if not subnets: return False
+
+        hotkey = next(
+            (str(item.get("alpha_target_hotkey", "")).strip()
+            for item in subnets.get("items", [])
+            if int(item.get("netuid", -1)) == 4),
+            None
+        )
+        if not hotkey:
+            self.log(
+                f"{Fore.BLUE+Style.BRIGHT}   Alpha   :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Target Hotkey Not Found In Subnets {Style.RESET_ALL}"
+            )
+            return False
+        
+        txid = self.submit_alpha_stake(idx, substrate, hotkey)
+        if not txid:
+            self.log(
+                f"{Fore.BLUE+Style.BRIGHT}   Alpha   :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Failed to Sign On-Chain {Style.RESET_ALL}"
+            )
+            return False
+        
+        alpha = await self.alpha_bought(idx, txid, proxy_url)
+        if not alpha: return False
+
+        self.log(
+            f"{Fore.BLUE+Style.BRIGHT}   Alpha   :{Style.RESET_ALL}"
+            f"{Fore.GREEN+Style.BRIGHT} Successfully Bought With 1 KNX {Style.RESET_ALL}"
+        )
+
+        return True
+
+    async def process_accounts(self, idx: int, proxy_url=None):
+        logined = await self.process_user_login(idx, proxy_url)
         if not logined: return False
 
         if self.USE_PROXY:
-            proxy_url = self.get_next_proxy_for_account(address)
+            proxy_url = self.get_next_proxy_for_account(idx)
 
-        accounts = await self.loyality_accounts(address, proxy_url)
+        accounts = await self.loyality_accounts(idx, proxy_url)
         if accounts:
             accounts_data = accounts.get("data") or []
 
@@ -614,7 +974,7 @@ class Konnex:
                 f"{Fore.WHITE+Style.BRIGHT} {amount} Points {Style.RESET_ALL}"
             )
 
-        rules = await self.loyality_rules(address, proxy_url)
+        rules = await self.loyality_rules(idx, proxy_url)
         if rules:
             rules_data = rules.get("data") or []
 
@@ -624,7 +984,7 @@ class Konnex:
             )
 
             if rules_id:
-                if await self.complete_checkin(address, rules_id, proxy_url):
+                if await self.complete_checkin(idx, rules_id, proxy_url):
                     self.log(
                         f"{Fore.CYAN+Style.BRIGHT}Check-In:{Style.RESET_ALL}"
                         f"{Fore.GREEN+Style.BRIGHT} Success {Style.RESET_ALL}"
@@ -635,6 +995,61 @@ class Konnex:
                     f"{Fore.YELLOW+Style.BRIGHT} Rules Id Not Found {Style.RESET_ALL}"
                 )
 
+        if not self.accounts[idx].get("konnex_wallet_mnemonic"):
+            self.log(
+                f"{Fore.CYAN+Style.BRIGHT}Testnet :{Style.RESET_ALL}"
+                f"{Fore.YELLOW+Style.BRIGHT} Konnex Wallet No Set {Style.RESET_ALL}"
+            )
+            return False
+        
+        self.log(f"{Fore.CYAN+Style.BRIGHT}Testnet :{Style.RESET_ALL}")
+
+        sign_data = self.generate_testnet_payload(idx)
+
+        verify = await self.verify_wallet(idx, sign_data, proxy_url)
+        if not verify: return False
+
+        snag_uid = verify.get("snag_user_id")
+
+        self.log(
+            f"{Fore.BLUE+Style.BRIGHT}   Verify  :{Style.RESET_ALL}"
+            f"{Fore.GREEN+Style.BRIGHT} Success {Style.RESET_ALL}"
+        )
+        self.log(
+            f"{Fore.BLUE+Style.BRIGHT}   User Id :{Style.RESET_ALL}"
+            f"{Fore.WHITE+Style.BRIGHT} {snag_uid} {Style.RESET_ALL}"
+        )
+
+        faucet = await self.claim_faucet(idx, sign_data, proxy_url)
+        if faucet:
+
+            if not faucet.get("already_claimed"):
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Faucet  :{Style.RESET_ALL}"
+                    f"{Fore.GREEN+Style.BRIGHT} KNX Tokens Claimed {Style.RESET_ALL}"
+                )
+            else:
+                self.log(
+                    f"{Fore.BLUE+Style.BRIGHT}   Faucet  :{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} KNX Tokens Already Claimed {Style.RESET_ALL}"
+                )
+
+        try:
+            substrate = SubstrateInterface(
+                url=self.API_URL["rpc_ws"],
+                ws_options={"sslopt": {"cert_reqs": ssl.CERT_NONE, "check_hostname": False}}
+            )
+        except Exception as e:
+            self.log(
+                f"{Fore.BLUE+Style.BRIGHT}   Status  :{Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Substrate Not Connected: {e} {Style.RESET_ALL}"
+            )
+            return False
+        
+        await self.process_drone_request(idx, substrate, proxy_url)
+
+        await self.process_alpha_bought(idx, substrate, proxy_url)
+        
     async def main(self):
         try:
             accounts = self.load_accounts()
@@ -655,7 +1070,7 @@ class Konnex:
                 if self.USE_PROXY: self.load_proxies()
 
                 separator = "=" * 25
-                for idx, private_key in enumerate(accounts, start=1):
+                for idx, account in enumerate(accounts, start=1):
                     self.log(
                         f"{Fore.CYAN + Style.BRIGHT}{separator}[{Style.RESET_ALL}"
                         f"{Fore.WHITE + Style.BRIGHT} {idx} {Style.RESET_ALL}"
@@ -664,20 +1079,25 @@ class Konnex:
                         f"{Fore.CYAN + Style.BRIGHT}]{separator}{Style.RESET_ALL}"
                     )
 
-                    address = self.generate_address(private_key)
-                    if not address: continue
-
-                    if address not in self.accounts:
-                        self.accounts[address] = {
+                    if idx not in self.accounts:
+                        self.accounts[idx] = {
                             "user_agent": random.choice(self.USER_AGENTS)
                         }
 
+                    evm_wallet_private_key = account.get("evm_wallet_private_key")
+                    konnex_wallet_mnemonic = account.get("konnex_wallet_mnemonic")
+
+                    self.accounts[idx]["evm_wallet_private_key"] = evm_wallet_private_key
+                    self.accounts[idx]["konnex_wallet_mnemonic"] = konnex_wallet_mnemonic
+
+                    if not self.generate_wallet(idx): continue
+
                     self.log(
                         f"{Fore.CYAN+Style.BRIGHT}Address :{Style.RESET_ALL}"
-                        f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(address)} {Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {self.mask_account(self.accounts[idx]['evm_address'])} {Style.RESET_ALL}"
                     )
                         
-                    await self.process_accounts(private_key, address)
+                    await self.process_accounts(idx)
                     await asyncio.sleep(random.uniform(2.0, 3.0))
 
                 self.log(f"{Fore.CYAN + Style.BRIGHT}={Style.RESET_ALL}"*60)
@@ -716,7 +1136,7 @@ if __name__ == "__main__":
         asyncio.run(bot.main())
     except KeyboardInterrupt:
         print(
-            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().astimezone(wib).strftime('%x %X %Z')} ]{Style.RESET_ALL}"
+            f"{Fore.CYAN + Style.BRIGHT}[ {datetime.now().strftime('%x %X')} ]{Style.RESET_ALL}"
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}"
             f"{Fore.RED + Style.BRIGHT}[ EXIT ] Konnex - BOT{Style.RESET_ALL}                                       "                              
         )

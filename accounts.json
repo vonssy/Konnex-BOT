@@ -1,0 +1,14 @@
+[
+    {
+        "evm_wallet_private_key": "your_evm_private_key (without 0x)",
+        "konnex_wallet_mnemonic": "word1 word2 word3 .... word12"
+    },
+    {
+        "evm_wallet_private_key": "your_evm_private_key (without 0x)",
+        "konnex_wallet_mnemonic": "word1 word2 word3 .... word12"
+    },
+    {
+        "evm_wallet_private_key": "your_evm_private_key (without 0x)",
+        "konnex_wallet_mnemonic": "word1 word2 word3 .... word12"
+    }
+]
