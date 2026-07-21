@@ -250,11 +250,11 @@ class Konnex:
         
     def generate_hub_payload(self, idx: int, csrf_token: str):
         try:
-            dt_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
-            issued_at = dt_now.replace("+00:00", "Z")
-
             keypair = self.accounts[idx]["evm_keypair"]
             address = self.accounts[idx]["evm_address"]
+
+            dt_now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            issued_at = dt_now.replace("+00:00", "Z")
 
             raw_message = json.dumps({
                 "domain": "hub.konnex.world",
@@ -300,12 +300,12 @@ class Konnex:
         
     def generate_testnet_payload(self, idx: int):
         try:
+            keypair = self.accounts[idx]["evm_keypair"]
+            
             nonce = str(int(time.time()))
-
             message = f"Konnex.world asks you to sign this text message to verify this wallet ownership. Nonce: {nonce}"
             
             encoded_message = encode_defunct(text=message)
-            keypair = self.accounts[idx]["evm_keypair"]
             signed_message = keypair.sign_message(encoded_message)
             signature = to_hex(signed_message.signature)
 
