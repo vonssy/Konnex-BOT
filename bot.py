@@ -186,7 +186,7 @@ class Konnex:
 
         return self.accounts[account]["cookies"]
     
-    def initialize_headers(self, account: str, type: str = "hub"):
+    def initialize_headers(self, idx: int, type: str = "hub"):
         if type == "testnet":
             headers = {
                 "Accept": "application/json, text/plain, */*",
@@ -201,7 +201,7 @@ class Konnex:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-site",
-                "User-Agent": self.accounts[account]["user_agent"]
+                "User-Agent": self.accounts[idx]["user_agent"]
             }
 
         else:
@@ -216,7 +216,7 @@ class Konnex:
                 "Sec-Fetch-Dest": "empty",
                 "Sec-Fetch-Mode": "cors",
                 "Sec-Fetch-Site": "same-origin",
-                "User-Agent": self.accounts[account]["user_agent"]
+                "User-Agent": self.accounts[idx]["user_agent"]
             }
             
 
@@ -376,10 +376,10 @@ class Konnex:
         decimals = substrate.token_decimals
 
         if decimals and decimals > 0:
-            max_stake = 1 * (10 ** decimals)
+            max_stake = 0.01 * (10 ** decimals)
             reserve_buffer = 10 ** max(decimals - 2, 0)
         else:
-            max_stake = 1 * 1_000_000_000
+            max_stake = 0.01 * 1_000_000_000
             reserve_buffer = 1_000_000
 
         address = self.accounts[idx]["knx_address"]
