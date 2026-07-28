@@ -947,7 +947,7 @@ class Konnex:
 
         self.log(
             f"{Fore.BLUE+Style.BRIGHT}   Alpha   :{Style.RESET_ALL}"
-            f"{Fore.GREEN+Style.BRIGHT} Successfully Bought With 1 KNX {Style.RESET_ALL}"
+            f"{Fore.GREEN+Style.BRIGHT} Successfully Bought {Style.RESET_ALL}"
         )
 
         return True
